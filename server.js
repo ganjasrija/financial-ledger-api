@@ -7,7 +7,8 @@ const port = process.env.PORT || 3000;
 
 app.use(express.json());
 
-app.use('/api', transactionRoutes);
+
+app.use('/', transactionRoutes); 
 
 app.listen(port, () => {
     console.log(`Financial Ledger API listening at http://localhost:${port}`);

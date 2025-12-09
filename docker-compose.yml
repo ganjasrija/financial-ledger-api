@@ -1,7 +1,7 @@
-# docker-compose.yml
 version: '3.8'
 
 services:
+  # 1. APPLICATION SERVICE (The App)
   app:
     build: .
     ports:
@@ -13,10 +13,12 @@ services:
       DB_NAME: ${DB_NAME}
       DB_PORT: 5432
       PORT: 3000
-    depends_on:
-      - db
+    depends_on: # <--- CRITICAL FIX: Use condition: service_healthy
+      db:
+        condition: service_healthy
     command: npm run start
 
+  # 2. DATABASE SERVICE (The DB)
   db:
     image: postgres:14-alpine
     restart: always
@@ -26,6 +28,13 @@ services:
       POSTGRES_DB: ${DB_NAME}
     volumes:
       - postgres_data:/var/lib/postgresql/data/
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck: # <--- CRITICAL FIX: ADD HEALTHCHECK
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s # Give the DB time to start up initially
 
 volumes:
   postgres_data:

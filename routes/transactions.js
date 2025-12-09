@@ -6,6 +6,7 @@ import database from '../database/database.js';
 
 const router = Router();
 
+// Middleware to parse and validate the amount
 const parseAmount = (req, res, next) => {
     try {
         const amount = new Decimal(req.body.amount);
@@ -19,26 +20,45 @@ const parseAmount = (req, res, next) => {
     }
 };
 
+// --- ACCOUNT ENDPOINTS ---
 
 router.post('/accounts', async (req, res) => {
     try {
-        const { userName, accountType, currency } = req.body;
-        const account = await accountsService.createAccount(userName, accountType, currency);
+        const { name, initial_balance } = req.body; 
+        const account = await accountsService.createAccount(name, initial_balance);
         res.status(201).json(account);
     } catch (error) {
+        console.error('Account creation error:', error);
         res.status(500).json({ error: 'Failed to create account.' });
+    }
+});
+
+router.get('/accounts', async (req, res) => {
+    try {
+        const resDb = await database.query(
+            'SELECT id, name, balance::TEXT AS balance FROM accounts ORDER BY id DESC'
+        );
+        res.status(200).json(resDb.rows);
+    } catch (error) {
+        console.error('List Accounts Error:', error);
+        res.status(500).json({ error: 'Failed to list accounts.' });
     }
 });
 
 router.get('/accounts/:accountId', async (req, res) => {
     try {
         const { accountId } = req.params;
-        const account = await accountsService.getAccountDetails(accountId);
+        const resDb = await database.query(
+            'SELECT id, name, balance::TEXT AS balance FROM accounts WHERE id = $1', 
+            [accountId]
+        );
+        const account = resDb.rows[0];
+        
         if (!account) return res.status(404).json({ error: 'Account not found.' });
 
-        const balance = await accountsService.calculateBalance(accountId);
-        res.json({ ...account, balance: balance });
+        res.status(200).json(account); 
     } catch (error) {
+        console.error('CRITICAL GET Account Error:', error); 
         res.status(500).json({ error: 'Failed to retrieve account.' });
     }
 });
@@ -53,81 +73,284 @@ router.get('/accounts/:accountId/ledger', async (req, res) => {
     }
 });
 
-
-
+// --- TRANSACTION ENDPOINTS ---
+// -----------------------------------------------------------
+// POST /transfers: Final, Correct Transactional Transfer Route
+// -----------------------------------------------------------
 router.post('/transfers', parseAmount, async (req, res) => {
-    const { sourceAccountId, destinationAccountId, currency, description } = req.body;
+    const { source_account_id, destination_account_id, currency, description } = req.body; 
     const amount = req.amount;
     let transactionId = null; 
+    let finalStatus = 'failed';
+    let responseBody = null;
+
+    const client = await database.getClient(); 
+    
+    try {
+        await client.query('BEGIN');
+        await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'); 
+        
+        // 1. Lock Accounts and Check Existence/Balance
+        const sourceAccountRes = await client.query( 
+            'SELECT id, balance FROM accounts WHERE id = $1 FOR UPDATE',
+            [source_account_id]
+        );
+        const destinationAccountRes = await client.query(
+            'SELECT id FROM accounts WHERE id = $1 FOR UPDATE', 
+            [destination_account_id]
+        );
+        
+        if (sourceAccountRes.rows.length === 0 || destinationAccountRes.rows.length === 0 || source_account_id === destination_account_id) {
+            throw new Error('Invalid source or destination account.');
+        }
+
+        const currentBalance = new Decimal(sourceAccountRes.rows[0].balance);
+
+        // 2. Insufficient Funds Check
+        if (currentBalance.lessThan(amount)) {
+            throw new Error('Insufficient funds. Transaction rolled back.'); 
+        }
+
+        // 3. Record the Main Transaction 
+        transactionId = await transactionsService.createTransaction(
+            { type: 'transfer', sourceAccountId: source_account_id, destinationAccountId: destination_account_id, amount: amount.toString(), currency, description },
+            client
+        );
+        
+        // 4. DEBIT THE SOURCE ACCOUNT BALANCE
+        await client.query(
+            'UPDATE accounts SET balance = balance - $1 WHERE id = $2',
+            [amount.toString(), source_account_id]
+        );
+        
+        // 5. CREDIT THE DESTINATION ACCOUNT BALANCE - CORRECTED
+        await client.query(
+            'UPDATE accounts SET balance = balance + $1 WHERE id = $2', // <-- PRODUCTION CODE
+            [amount.toString(), destination_account_id]
+        );
+        
+        // 6. Record Ledger Entries
+        await transactionsService.createLedgerEntry(
+            { transactionId, accountId: source_account_id, entryType: 'DEBIT', amount: amount.toString() },
+            client
+        );
+        
+        await transactionsService.createLedgerEntry(
+            { transactionId, accountId: destination_account_id, entryType: 'CREDIT', amount: amount.toString() },
+            client
+        );
+        
+        // 7. Finalize and Commit
+        await client.query('COMMIT'); 
+        finalStatus = 'completed'; 
+        
+        responseBody = {
+            message: 'Transfer completed successfully.', 
+            transactionId,
+            new_source_balance: currentBalance.minus(amount).toString()
+        };
+        
+        res.status(201).json(responseBody);
+
+    } catch (error) {
+        // !!! CRITICAL ROLLBACK EXECUTION !!!
+        await client.query('ROLLBACK'); 
+        
+        if (error.message.includes('Insufficient funds') || error.message.includes('Invalid')) {
+             responseBody = { error: error.message };
+             return res.status(400).json(responseBody);
+        }
+        
+        console.error('Final Transaction Error (500):', error); 
+        responseBody = { error: 'Transaction failed due to an internal error or invalid account data.' };
+        return res.status(500).json(responseBody);
+        
+    } finally {
+        if (client) { 
+            client.release();
+        }
+
+        if (transactionId) {
+            try {
+                await transactionsService.updateTransactionStatus(transactionId, finalStatus); 
+            } catch (statusError) {
+                console.error('Async Status Update Failed:', statusError);
+            }
+        }
+    }
+});
+
+// -----------------------------------------------------------
+// POST /deposits: Simulate a Deposit into an Account
+// -----------------------------------------------------------
+router.post('/deposits', parseAmount, async (req, res) => {
+    const { account_id, currency, description } = req.body;
+    const amount = req.amount;
+    let transactionId = null;
+    let initialBalance = null; 
+    let finalStatus = 'failed';
+    let responseBody = null; 
 
     const client = await database.getClient();
     
     try {
-        
         await client.query('BEGIN');
         
-    
-        await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'); 
-
-        const sourceAccount = await accountsService.getAccountDetails(sourceAccountId);
-        const destinationAccount = await accountsService.getAccountDetails(destinationAccountId);
+        // 1. Check existence and lock the user's account, and get the balance
+        const accountRes = await client.query(
+            'SELECT id, balance FROM accounts WHERE id = $1 FOR UPDATE',
+            [account_id] 
+        );
         
-        if (!sourceAccount || !destinationAccount || sourceAccountId === destinationAccountId) {
-            throw new Error('Invalid source or destination account.');
+        if (accountRes.rows.length === 0) {
+            throw new Error('Invalid destination account.');
         }
 
+        initialBalance = new Decimal(accountRes.rows[0].balance);
+
+        // 2. Record the Main Transaction
         transactionId = await transactionsService.createTransaction(
-            { type: 'transfer', sourceAccountId, destinationAccountId, amount: amount.toString(), currency, description },
+            { type: 'deposit', sourceAccountId: 0, destinationAccountId: account_id, amount: amount.toString(), currency, description },
             client
         );
         
+        // 3. CREDIT THE USER'S ACCOUNT BALANCE
+        await client.query(
+            'UPDATE accounts SET balance = balance + $1 WHERE id = $2',
+            [amount.toString(), account_id]
+        );
         
-        const currentBalanceString = await accountsService.calculateBalance(sourceAccountId, client);
-        const currentBalance = new Decimal(currentBalanceString);
+        // 4. Record Ledger Entry (Credit to user's account)
+        await transactionsService.createLedgerEntry(
+            { transactionId, accountId: account_id, entryType: 'CREDIT', amount: amount.toString() },
+            client
+        );
+        
+        await client.query('COMMIT'); 
+        finalStatus = 'completed';
+        
+        responseBody = { 
+            message: 'Deposit completed successfully.', 
+            transactionId,
+            new_balance: initialBalance.plus(amount).toString()
+        };
 
-        if (currentBalance.lessThan(amount)) {
+        res.status(201).json(responseBody);
+
+    } catch (error) {
+        await client.query('ROLLBACK'); 
+        
+        if (error.message.includes('Invalid')) {
+             responseBody = { error: error.message };
+             return res.status(400).json(responseBody); 
+        }
+        
+        console.error('Deposit Transaction Error (500):', error); 
+        responseBody = { error: 'Deposit failed due to an internal error.' };
+        return res.status(500).json(responseBody);
+        
+    } finally {
+        if (client) { 
+            client.release();
+        }
+        
+        if (transactionId) {
+            try {
+                await transactionsService.updateTransactionStatus(transactionId, finalStatus);
+            } catch (statusError) {
+                console.error('Async Status Update Failed:', statusError);
+            }
+        }
+    }
+});
+
+// -----------------------------------------------------------
+// POST /withdrawals: Simulate a Withdrawal from an Account
+// -----------------------------------------------------------
+router.post('/withdrawals', parseAmount, async (req, res) => {
+    const { account_id, currency, description } = req.body;
+    const amount = req.amount;
+    let transactionId = null;
+    let currentBalance = null; 
+    let finalStatus = 'failed';
+    let responseBody = null; 
+
+    const client = await database.getClient();
     
+    try {
+        await client.query('BEGIN');
+        await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'); 
+
+        // 1. Check existence, lock the account, and retrieve balance
+        const accountRes = await client.query(
+            'SELECT id, balance FROM accounts WHERE id = $1 FOR UPDATE',
+            [account_id]
+        );
+        
+        if (accountRes.rows.length === 0) {
+            throw new Error('Invalid source account.');
+        }
+
+        currentBalance = new Decimal(accountRes.rows[0].balance);
+
+        // 2. Insufficient Funds Check (CRITICAL)
+        if (currentBalance.lessThan(amount)) {
             throw new Error('Insufficient funds. Transaction rolled back.'); 
         }
 
-        
-        
-        
-        await transactionsService.createLedgerEntry(
-            { transactionId, accountId: sourceAccountId, entryType: 'DEBIT', amount: amount.toString() },
+        // 3. Record the Main Transaction
+        transactionId = await transactionsService.createTransaction(
+            { type: 'withdrawal', sourceAccountId: account_id, destinationAccountId: 0, amount: amount.toString(), currency, description },
             client
         );
         
+        // 4. DEBIT THE USER'S ACCOUNT BALANCE
+        await client.query(
+            'UPDATE accounts SET balance = balance - $1 WHERE id = $2',
+            [amount.toString(), account_id]
+        );
         
+        // 5. Record Ledger Entry (Debit from user's account)
         await transactionsService.createLedgerEntry(
-            { transactionId, accountId: destinationAccountId, entryType: 'CREDIT', amount: amount.toString() },
+            { transactionId, accountId: account_id, entryType: 'DEBIT', amount: amount.toString() },
             client
         );
+        
         await client.query('COMMIT'); 
-        await transactionsService.updateTransactionStatus(transactionId, 'completed'); 
+        finalStatus = 'completed';
         
-        res.status(200).json({ 
-            message: 'Transfer completed successfully.', 
+        responseBody = {
+            message: 'Withdrawal completed successfully.', 
             transactionId,
             new_source_balance: currentBalance.minus(amount).toString()
-        });
+        };
 
+        res.status(201).json(responseBody);
+        
     } catch (error) {
-    
         await client.query('ROLLBACK'); 
         
-        if (transactionId) {
-            await transactionsService.updateTransactionStatus(transactionId, 'failed'); 
+        if (error.message.includes('Insufficient funds') || error.message.includes('Invalid')) {
+             responseBody = { error: error.message };
+             return res.status(400).json(responseBody);
         }
         
-        if (error.message.includes('Insufficient funds')) {
-             return res.status(422).json({ error: error.message });
-        }
-        
-        res.status(500).json({ error: 'Transaction failed due to an internal error or invalid account data.' });
+        console.error('Withdrawal Transaction Error (500):', error); 
+        responseBody = { error: 'Withdrawal failed due to an internal error.' };
+        return res.status(500).json(responseBody);
         
     } finally {
-        client.release();
+        if (client) { 
+            client.release();
+        }
+
+        if (transactionId) {
+            try {
+                await transactionsService.updateTransactionStatus(transactionId, finalStatus);
+            } catch (statusError) {
+                console.error('Async Status Update Failed:', statusError);
+            }
+        }
     }
 });
 

@@ -1,11 +1,11 @@
-import database from '../database/database.js';
-
+import database from '../database/database.js'; // Ensure this path is correct
 
 export const createTransaction = async (data, client) => {
+    // Uses the transactional client.
     const { type, sourceAccountId, destinationAccountId, amount, currency, description } = data;
     const res = await client.query(
-        `INSERT INTO transactions (type, source_account_id, destination_account_id, amount, currency, description) 
-         VALUES ($1, $2, $3, $4, $5, $6) 
+        `INSERT INTO transactions (type, source_account_id, destination_account_id, amount, currency, description, status) 
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending') 
          RETURNING id`,
         [type, sourceAccountId, destinationAccountId, amount, currency, description]
     );
@@ -13,6 +13,7 @@ export const createTransaction = async (data, client) => {
 };
 
 export const createLedgerEntry = async (data, client) => {
+    // Uses the transactional client.
     const { transactionId, accountId, entryType, amount } = data;
     await client.query(
         `INSERT INTO ledger_entries (transaction_id, account_id, entry_type, amount) 
@@ -21,8 +22,9 @@ export const createLedgerEntry = async (data, client) => {
     );
 };
 
-
 export const updateTransactionStatus = async (transactionId, status) => {
+    // FINAL FIX: This function MUST ONLY use the global database pool.
+    // It is called in the router AFTER the transactional client has been released.
     await database.query(
         `UPDATE transactions SET status = $1 WHERE id = $2`,
         [status, transactionId]
