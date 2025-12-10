@@ -6,7 +6,7 @@ import database from '../database/database.js';
 
 const router = Router();
 
-// Middleware to parse and validate the amount
+
 const parseAmount = (req, res, next) => {
     try {
         const amount = new Decimal(req.body.amount);
@@ -20,7 +20,7 @@ const parseAmount = (req, res, next) => {
     }
 };
 
-// --- ACCOUNT ENDPOINTS ---
+
 
 router.post('/accounts', async (req, res) => {
     try {
@@ -73,10 +73,6 @@ router.get('/accounts/:accountId/ledger', async (req, res) => {
     }
 });
 
-// --- TRANSACTION ENDPOINTS ---
-// -----------------------------------------------------------
-// POST /transfers: Final, Correct Transactional Transfer Route
-// -----------------------------------------------------------
 router.post('/transfers', parseAmount, async (req, res) => {
     const { source_account_id, destination_account_id, currency, description } = req.body; 
     const amount = req.amount;
@@ -90,7 +86,7 @@ router.post('/transfers', parseAmount, async (req, res) => {
         await client.query('BEGIN');
         await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'); 
         
-        // 1. Lock Accounts and Check Existence/Balance
+        
         const sourceAccountRes = await client.query( 
             'SELECT id, balance FROM accounts WHERE id = $1 FOR UPDATE',
             [source_account_id]
@@ -106,30 +102,30 @@ router.post('/transfers', parseAmount, async (req, res) => {
 
         const currentBalance = new Decimal(sourceAccountRes.rows[0].balance);
 
-        // 2. Insufficient Funds Check
+        
         if (currentBalance.lessThan(amount)) {
             throw new Error('Insufficient funds. Transaction rolled back.'); 
         }
 
-        // 3. Record the Main Transaction 
+        
         transactionId = await transactionsService.createTransaction(
             { type: 'transfer', sourceAccountId: source_account_id, destinationAccountId: destination_account_id, amount: amount.toString(), currency, description },
             client
         );
         
-        // 4. DEBIT THE SOURCE ACCOUNT BALANCE
+
         await client.query(
             'UPDATE accounts SET balance = balance - $1 WHERE id = $2',
             [amount.toString(), source_account_id]
         );
         
-        // 5. CREDIT THE DESTINATION ACCOUNT BALANCE - CORRECTED
+
         await client.query(
-            'UPDATE accounts SET balance = balance + $1 WHERE id = $2', // <-- PRODUCTION CODE
+            'UPDATE accounts SET balance = balance + $1 WHERE id = $2', 
             [amount.toString(), destination_account_id]
         );
         
-        // 6. Record Ledger Entries
+
         await transactionsService.createLedgerEntry(
             { transactionId, accountId: source_account_id, entryType: 'DEBIT', amount: amount.toString() },
             client
@@ -140,7 +136,7 @@ router.post('/transfers', parseAmount, async (req, res) => {
             client
         );
         
-        // 7. Finalize and Commit
+    
         await client.query('COMMIT'); 
         finalStatus = 'completed'; 
         
@@ -153,14 +149,22 @@ router.post('/transfers', parseAmount, async (req, res) => {
         res.status(201).json(responseBody);
 
     } catch (error) {
-        // !!! CRITICAL ROLLBACK EXECUTION !!!
+        
         await client.query('ROLLBACK'); 
         
-        if (error.message.includes('Insufficient funds') || error.message.includes('Invalid')) {
+        
+        if (error.message.includes('Insufficient funds')) {
+             responseBody = { error: error.message };
+             return res.status(422).json(responseBody); 
+        }
+
+
+        if (error.message.includes('Invalid')) {
              responseBody = { error: error.message };
              return res.status(400).json(responseBody);
         }
         
+    
         console.error('Final Transaction Error (500):', error); 
         responseBody = { error: 'Transaction failed due to an internal error or invalid account data.' };
         return res.status(500).json(responseBody);
@@ -180,9 +184,7 @@ router.post('/transfers', parseAmount, async (req, res) => {
     }
 });
 
-// -----------------------------------------------------------
-// POST /deposits: Simulate a Deposit into an Account
-// -----------------------------------------------------------
+
 router.post('/deposits', parseAmount, async (req, res) => {
     const { account_id, currency, description } = req.body;
     const amount = req.amount;
@@ -195,8 +197,7 @@ router.post('/deposits', parseAmount, async (req, res) => {
     
     try {
         await client.query('BEGIN');
-        
-        // 1. Check existence and lock the user's account, and get the balance
+
         const accountRes = await client.query(
             'SELECT id, balance FROM accounts WHERE id = $1 FOR UPDATE',
             [account_id] 
@@ -208,19 +209,17 @@ router.post('/deposits', parseAmount, async (req, res) => {
 
         initialBalance = new Decimal(accountRes.rows[0].balance);
 
-        // 2. Record the Main Transaction
         transactionId = await transactionsService.createTransaction(
             { type: 'deposit', sourceAccountId: 0, destinationAccountId: account_id, amount: amount.toString(), currency, description },
             client
         );
         
-        // 3. CREDIT THE USER'S ACCOUNT BALANCE
+    
         await client.query(
             'UPDATE accounts SET balance = balance + $1 WHERE id = $2',
             [amount.toString(), account_id]
         );
-        
-        // 4. Record Ledger Entry (Credit to user's account)
+    
         await transactionsService.createLedgerEntry(
             { transactionId, accountId: account_id, entryType: 'CREDIT', amount: amount.toString() },
             client
@@ -264,9 +263,7 @@ router.post('/deposits', parseAmount, async (req, res) => {
     }
 });
 
-// -----------------------------------------------------------
-// POST /withdrawals: Simulate a Withdrawal from an Account
-// -----------------------------------------------------------
+
 router.post('/withdrawals', parseAmount, async (req, res) => {
     const { account_id, currency, description } = req.body;
     const amount = req.amount;
@@ -281,7 +278,7 @@ router.post('/withdrawals', parseAmount, async (req, res) => {
         await client.query('BEGIN');
         await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'); 
 
-        // 1. Check existence, lock the account, and retrieve balance
+
         const accountRes = await client.query(
             'SELECT id, balance FROM accounts WHERE id = $1 FOR UPDATE',
             [account_id]
@@ -293,24 +290,24 @@ router.post('/withdrawals', parseAmount, async (req, res) => {
 
         currentBalance = new Decimal(accountRes.rows[0].balance);
 
-        // 2. Insufficient Funds Check (CRITICAL)
+
         if (currentBalance.lessThan(amount)) {
             throw new Error('Insufficient funds. Transaction rolled back.'); 
         }
 
-        // 3. Record the Main Transaction
+        
         transactionId = await transactionsService.createTransaction(
             { type: 'withdrawal', sourceAccountId: account_id, destinationAccountId: 0, amount: amount.toString(), currency, description },
             client
         );
         
-        // 4. DEBIT THE USER'S ACCOUNT BALANCE
+
         await client.query(
             'UPDATE accounts SET balance = balance - $1 WHERE id = $2',
             [amount.toString(), account_id]
         );
         
-        // 5. Record Ledger Entry (Debit from user's account)
+    
         await transactionsService.createLedgerEntry(
             { transactionId, accountId: account_id, entryType: 'DEBIT', amount: amount.toString() },
             client
@@ -330,7 +327,14 @@ router.post('/withdrawals', parseAmount, async (req, res) => {
     } catch (error) {
         await client.query('ROLLBACK'); 
         
-        if (error.message.includes('Insufficient funds') || error.message.includes('Invalid')) {
+        
+        if (error.message.includes('Insufficient funds')) {
+             responseBody = { error: error.message };
+             return res.status(422).json(responseBody); 
+        }
+        
+
+        if (error.message.includes('Invalid')) {
              responseBody = { error: error.message };
              return res.status(400).json(responseBody);
         }

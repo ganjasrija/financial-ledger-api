@@ -1,7 +1,6 @@
-import database from '../database/database.js'; // Ensure this path is correct
+import database from '../database/database.js'; 
 
 export const createTransaction = async (data, client) => {
-    // Uses the transactional client.
     const { type, sourceAccountId, destinationAccountId, amount, currency, description } = data;
     const res = await client.query(
         `INSERT INTO transactions (type, source_account_id, destination_account_id, amount, currency, description, status) 
@@ -13,7 +12,7 @@ export const createTransaction = async (data, client) => {
 };
 
 export const createLedgerEntry = async (data, client) => {
-    // Uses the transactional client.
+    
     const { transactionId, accountId, entryType, amount } = data;
     await client.query(
         `INSERT INTO ledger_entries (transaction_id, account_id, entry_type, amount) 

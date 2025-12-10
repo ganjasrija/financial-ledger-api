@@ -5,7 +5,7 @@ const { Pool } = pkg;
 
 const pool = new Pool({
     user: process.env.DB_USER,
-    // CORRECTED: Ensure 'host' uses DB_HOST variable
+  
     host: process.env.DB_HOST, 
     database: process.env.DB_NAME,
     password: process.env.DB_PASSWORD,
