@@ -22,8 +22,7 @@ export const createLedgerEntry = async (data, client) => {
 };
 
 export const updateTransactionStatus = async (transactionId, status) => {
-    // FINAL FIX: This function MUST ONLY use the global database pool.
-    // It is called in the router AFTER the transactional client has been released.
+    
     await database.query(
         `UPDATE transactions SET status = $1 WHERE id = $2`,
         [status, transactionId]
